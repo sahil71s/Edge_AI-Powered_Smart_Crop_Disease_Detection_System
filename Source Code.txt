@@ -1,0 +1,143 @@
+#include "esp_camera.h"
+#include <EloquentTinyML.h>
+#include <eloquent_tinyml/tensorflow.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include "model_1.h" 
+
+#define FLASH 4 
+#define W_OLED 128
+#define H_OLED 64
+
+Adafruit_SSD1306 oled(W_OLED, H_OLED, &Wire, -1);
+
+Eloquent::TinyML::TensorFlow::TensorFlow<1, 2, (80 * 1024)> ml_model;
+float *img_buffer; 
+
+camera_config_t cam_cfg;
+
+void init_camera() {
+  cam_cfg.ledc_channel = LEDC_CHANNEL_0;
+  cam_cfg.ledc_timer = LEDC_TIMER_0;
+  cam_cfg.pin_d0 = 5;
+  cam_cfg.pin_d1 = 18;
+  cam_cfg.pin_d2 = 19;
+  cam_cfg.pin_d3 = 21;
+  cam_cfg.pin_d4 = 36;
+  cam_cfg.pin_d5 = 39;
+  cam_cfg.pin_d6 = 34;
+  cam_cfg.pin_d7 = 35;
+  cam_cfg.pin_xclk = 0;
+  cam_cfg.pin_pclk = 22;
+  cam_cfg.pin_vsync = 25;
+  cam_cfg.pin_href = 23;
+  cam_cfg.pin_sccb_sda = 26;
+  cam_cfg.pin_sccb_scl = 27;
+  cam_cfg.pin_pwdn = 32;
+  cam_cfg.pin_reset = -1;
+  cam_cfg.xclk_freq_hz = 20000000;
+  cam_cfg.pixel_format = PIXFORMAT_RGB565;
+  cam_cfg.frame_size = FRAMESIZE_QVGA;
+  cam_cfg.jpeg_quality = 12;
+  cam_cfg.fb_count = 1;
+  esp_camera_init(&cam_cfg);
+}
+
+// crop and scale down to 96x96
+void prep_pixels(camera_fb_t *fb, float *buf) {
+  int idx = 0;
+  uint16_t *pixels = (uint16_t *)fb->buf;
+  int off_x = 40; // (320 - 240) / 2
+
+  for (int i = 0; i < 96; i++) {
+    for (int j = 0; j < 96; j++) {
+      int px_x = off_x + (int)(j * 2.5);
+      int px_y = (int)(i * 2.5);
+      uint16_t p = pixels[(px_y * 320) + px_x];
+      
+      // rgb normalization
+      buf[idx++] = (((p >> 11) & 0x1F) * 255.0 / 31.0) / 255.0;
+      buf[idx++] = (((p >> 5) & 0x3F) * 255.0 / 63.0) / 255.0;
+      buf[idx++] = ((p & 0x1F) * 255.0 / 31.0) / 255.0;
+    }
+  }
+}
+
+void update_screen(bool is_sick) {
+  oled.clearDisplay();
+  oled.setTextSize(1);
+  oled.setCursor(0, 0);
+  
+  if (is_sick) {
+    oled.println(">> TREATMENT:");
+    oled.println("- Isolate plant");
+    oled.println("- Use Neem Oil");
+    oled.println("- Cut bad leaves");
+  } else {
+    oled.println(">> ADVICE:");
+    oled.println("- Keep watering");
+    oled.println("- Add NPK organic");
+    oled.println("- Looking good!");
+  }
+  oled.display();
+}
+
+void setup() {
+  Serial.begin(115200);
+  
+  pinMode(FLASH, OUTPUT);
+  digitalWrite(FLASH, LOW); 
+
+  Wire.begin(15, 14); 
+  if(!oled.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("OLED init failed");
+  }
+  
+  oled.clearDisplay();
+  oled.setTextColor(WHITE);
+  oled.setCursor(0,20);
+  oled.println("SYSTEM BOOT...");
+  oled.display();
+
+  // grab PSRAM memory for the AI array
+  img_buffer = (float*) ps_malloc(96 * 96 * 3 * sizeof(float));
+  
+  init_camera();
+  ml_model.begin(quantized_model_tflite);
+  
+  oled.clearDisplay();
+  oled.setCursor(0,25);
+  oled.println("READY.");
+  oled.display();
+  delay(1000);
+}
+
+void loop() {
+  digitalWrite(FLASH, HIGH);
+  delay(150); 
+  camera_fb_t *frame = esp_camera_fb_get();
+  digitalWrite(FLASH, LOW);
+
+  if (!frame) return;
+
+  prep_pixels(frame, img_buffer);
+  
+  float preds[2];
+  ml_model.predict(img_buffer, preds);
+
+  oled.clearDisplay();
+  oled.setTextSize(2);
+  oled.setCursor(0, 5);
+
+  bool sick = preds[1] > preds[0];
+  
+  oled.println(sick ? "DISEASED" : "HEALTHY");
+  oled.display();
+  delay(2000);
+  
+  update_screen(sick);
+
+  esp_camera_fb_return(frame);
+  delay(4000); 
+}
